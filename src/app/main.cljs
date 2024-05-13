@@ -6,17 +6,20 @@
 
 (def active-subs (atom []))
 
-(def active-stream? #{"tap"})
+(def active-stream? #{"debounce+throttle"})
 
 (def streams
-  {
-   ;; Basic cold stream
+  {;; Basic cold stream
    "basic"
    (rx/of 1 2 3)
 
    ;; From timeout
    "timer"
    (rx/timer 0 100)
+
+   ;; From promises
+   "from-promise"
+   (rx/from (utils/timeout 1000))
 
    ;; Create a promise from a function
    "constructor"
@@ -51,16 +54,19 @@
    (rx/concat
     (->> (utils/stream-from-event js/document "mousedown" utils/event->coord)
          (rx/take 2))
-    (utils/stream-from-event js/document "mousemove" utils/event->coord))
+    (->> (utils/stream-from-event js/document "mousemove" utils/event->coord)
+         (rx/take 10)))
 
    "merge"
    (rx/merge
     (utils/stream-from-event js/document "mousedown" utils/event->coord)
     (utils/stream-from-event js/document "mousemove" utils/event->coord))
 
-   "debounce"
+   "debounce+throttle"
    (->> (utils/stream-from-event js/document "mousemove" utils/event->coord)
-        (rx/debounce 100))
+        (rx/debounce 500)
+        #_(rx/throttle 500)
+        )
 
    "tap+ignore"
    (->> (rx/of 1 2 3)
@@ -69,8 +75,60 @@
         (rx/tap #(println "B:" %))
         (rx/ignore))
 
-   }
-  )
+   "subjects"
+   (let [subject (rx/subject)]
+     (->> (rx/from (utils/timeout 1000))
+          (rx/subs! (fn []
+                      (rx/push! subject "hello")
+                      (rx/push! subject "world")
+                      (rx/end! subject))))
+     subject)
+
+
+   "merge-map"
+   (->> (rx/from (utils/timeout 1000))
+        (rx/merge-map (fn []
+                        (rx/of 1 2 3 4)))
+
+        (rx/merge-map (fn [v]
+                        (->> (rx/from (utils/timeout 100))
+                             (rx/map (fn [] v))))))
+
+   "with-latest-from"
+   (->> (utils/stream-from-event js/document "mousedown" utils/event->coord)
+        (rx/with-latest-from
+          (utils/stream-from-event js/document "mousemove" utils/event->coord)))
+
+   "take-until"
+   (->> (utils/stream-from-event js/document "mousemove" utils/event->coord)
+        (rx/take-until (utils/stream-from-event js/document "mousedown" utils/event->coord)))
+
+   "catch"
+   (->> (utils/stream-from-event js/document "mousedown" utils/event->coord)
+        (rx/tap (fn [[x y]] (if (or (> x 1000) (> y 1000))
+                              (throw (js/Error. "Error")))))
+        (rx/catch #(do
+                     (.error js/console %)
+                     (utils/stream-from-event js/document "mousedown" utils/event->coord))))
+
+   "reduce"
+   (->> (utils/stream-from-event js/document "mousedown" utils/event->coord)
+        (rx/take 5)
+        (rx/tap #(prn "?" %))
+        (rx/reduce (fn [[accx accy] [x y]]
+                     [(+ accx x) (+ accy y)])
+                   [0 0]))
+   
+   "scan"
+   (->> (utils/stream-from-event js/document "mousedown" utils/event->coord)
+        (rx/scan (fn [[accx accy] [x y]]
+                   [(+ accx x) (+ accy y)])
+                 [0 0]))
+
+   "buffer"
+   (->> (utils/stream-from-event js/document "mousemove" utils/event->coord)
+        (rx/buffer 3 1))
+   })
 
 
 (defn hot-vs-cold
@@ -117,11 +175,12 @@
 ;; start is called by init and after code reloading finishes
 (defn ^:dev/after-load start []
   (doseq [[name stream] (filter (fn [[name _]] (active-stream? name)) streams)]
-    (let [subid (->> stream
+    (let [_ (println (str "[" name "] START " (.toUTCString (js/Date.))))
+          subid (->> stream
                      (rx/subs!
                       #(println (str "[" name "] " %))
                       #(println (str "[" name "] ERROR: " %))
-                      #(println (str "[" name "] COMPLETED"))
+                      #(println (str "[" name "] COMPLETED " (.toUTCString (js/Date.))))
                       ))]
       (swap! active-subs conj subid)))
 
